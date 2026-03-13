@@ -11,6 +11,22 @@ permissions:
 jobs:
   release:
     runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+            suffix: darwin-arm64
+          - goos: darwin
+            goarch: amd64
+            suffix: darwin-amd64
+          - goos: windows
+            goarch: amd64
+            suffix: windows-amd64
+            ext: .exe
+          - goos: linux
+            goarch: amd64
+            suffix: linux-amd64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,16 +38,22 @@ jobs:
 
       - name: Build
         run: |
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o txqr ./cmd/txqr
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o txqr${{ matrix.ext }} ./cmd/txqr
 
       - name: Create tar.gz
         run: |
-          tar czf txqr-darwin-arm64.tar.gz txqr
+          tar czf txqr-${{ matrix.suffix }}.tar.gz txqr${{ matrix.ext }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: txqr-${{ matrix.suffix }}
+          path: txqr-${{ matrix.suffix }}.tar.gz
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: txqr-darwin-arm64.tar.gz
+          files: txqr-*.tar.gz
           draft: false
           prerelease: false
         env:
