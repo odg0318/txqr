@@ -1,0 +1,57 @@
+# Dockerfile.android
+# Builds txqr decoder AAR for Android using gomobile bind.
+#
+# Usage:
+#   docker build -f Dockerfile.android -t txqr-aar-builder .
+#   docker create --name txqr-aar txqr-aar-builder
+#   docker cp txqr-aar:/output/txqr.aar ./txqr.aar
+#   docker rm txqr-aar
+
+FROM golang:1.25-bookworm
+
+# ---- Android SDK/NDK ----
+ENV ANDROID_HOME=/opt/android-sdk
+ENV ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/26.1.10909125
+ENV PATH=${PATH}:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        unzip \
+        wget \
+        openjdk-17-jdk-headless \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download Android command-line tools
+RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
+    wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdline-tools.zip && \
+    unzip -q /tmp/cmdline-tools.zip -d ${ANDROID_HOME}/cmdline-tools && \
+    mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
+    rm /tmp/cmdline-tools.zip
+
+# Accept licenses and install NDK + platform
+RUN yes | sdkmanager --licenses > /dev/null 2>&1 && \
+    sdkmanager "ndk;26.1.10909125" "platforms;android-34" "build-tools;34.0.0"
+
+# ---- Build ----
+WORKDIR /src
+COPY . .
+
+# ---- Build Android APK ----
+# Copy AAR to android app libs directory
+RUN mkdir -p android/app/libs && \
+    cp txqr.aar android/app/libs/
+
+# Install gradle and generate wrapper
+RUN wget -q https://services.gradle.org/distributions/gradle-8.4-bin.zip -O /tmp/gradle.zip && \
+    unzip -q /tmp/gradle.zip -d /opt && \
+    rm /tmp/gradle.zip
+
+ENV GRADLE_HOME=/opt/gradle-8.4
+ENV PATH=${PATH}:${GRADLE_HOME}/bin
+
+# Generate gradle wrapper and build debug APK
+WORKDIR /src/android
+RUN gradle wrapper --gradle-version 8.4
+RUN ./gradlew assembleDebug
+
+# Copy APK to a known location for easy extraction
+RUN cp app/build/outputs/apk/debug/app-debug.apk /txqr.apk

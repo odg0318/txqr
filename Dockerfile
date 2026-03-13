@@ -1,4 +1,4 @@
-FROM golang:1.21-alpine
+FROM golang:1.25-alpine
 
 RUN apk -U add git ca-certificates
 
@@ -8,4 +8,4 @@ COPY . .
 
 RUN go mod tidy && \
         go mod verify && \
-        CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o /txqr ./cmd/txqr
+        CGO_ENABLED=0 go build -o /txqr ./cmd/txqr
