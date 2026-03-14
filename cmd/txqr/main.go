@@ -46,20 +46,41 @@ func runWrite() {
 	size := flags.Int("size", 300, "QR code size")
 	fps := flags.Int("fps", 5, "Animation FPS")
 	output := flags.String("o", "out.gif", "Output animated gif file")
+	name := flags.String("name", "stdin", "Filename to use when reading from stdin")
 
 	if err := flags.Parse(os.Args[2:]); err != nil {
 		log.Fatal(err)
 	}
 
-	if flags.NArg() != 1 {
-		log.Fatalf("Usage: txqr write [options] <file>")
+	if flags.NArg() > 1 {
+		log.Fatalf("Usage: txqr write [options] [<file>]\n       echo 'data' | txqr write [options]")
 	}
 
-	filename := flags.Arg(0)
+	var (
+		data     []byte
+		filename string
+		err      error
+	)
 
-	data, err := ioutil.ReadFile(filename)
+	if flags.NArg() == 1 {
+		// File argument provided - read from file
+		filename = flags.Arg(0)
+		data, err = ioutil.ReadFile(filename)
+	} else {
+		// No file argument - check stdin
+		fi, _ := os.Stdin.Stat()
+		if fi.Mode()&os.ModeCharDevice == 0 {
+			// Stdin is piped - read from stdin
+			data, err = io.ReadAll(os.Stdin)
+			filename = *name
+		} else {
+			// No piped input and no file - show usage error
+			log.Fatalf("Usage: txqr write [options] [<file>]\n       echo 'data' | txqr write [options]")
+		}
+	}
+
 	if err != nil {
-		log.Fatalf("[ERROR] Read input file: %v", err)
+		log.Fatalf("[ERROR] Read input: %v", err)
 	}
 
 	out, err := AnimatedGif(data, filename, *size, *fps, *splitSize, qr.Medium)
