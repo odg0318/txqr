@@ -6,10 +6,16 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.Color;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Base64;
 import android.view.View;
 import android.widget.Button;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -19,6 +25,9 @@ import androidx.annotation.NonNull;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.common.BitMatrix;
+import com.google.zxing.qrcode.QRCodeWriter;
 import com.journeyapps.barcodescanner.CaptureManager;
 import com.journeyapps.barcodescanner.DecoratedBarcodeView;
 
@@ -27,12 +36,15 @@ import txqr.*;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.zip.Inflater;
 
 public class MainActivity extends Activity {
 
     private static final int PERMISSION_REQUESTS = 1;
     private static final int PERMISSION_CAMERA = 0;
+    private static final int QR_SIZE = 750;  // 2.5x larger
+    private static final int FRAME_DELAY_MS = 50; // 20 FPS (much faster)
 
     private Decoder decoder;
     private DecoratedBarcodeView barcodeView;
@@ -45,10 +57,26 @@ public class MainActivity extends Activity {
     private Button copyButton;
     private ScrollView textScrollView;
     private TextView textContentView;
+    private ImageView qrDisplayView;
+    private LinearLayout qrContainerLayout;
 
     private int frameCount = 0;
     private String decodedData = null;
     private String decodedFilename = null;
+
+    // Store raw scanned QR chunks for relay
+    private ArrayList<String> scannedChunks = new ArrayList<>();
+
+    // Pre-generated QR bitmaps for faster animation
+    private ArrayList<Bitmap> qrBitmaps = new ArrayList<>();
+
+    private Handler relayHandler = new Handler(Looper.getMainLooper());
+    private Runnable relayRunnable;
+    private int currentRelayFrame = 0;
+    private boolean isRelaying = false;
+
+    // Preview mode: 0 = show text, 1 = relay, 2 = hide
+    private int previewMode = 0;
 
     private CaptureManager capture;
 
@@ -107,7 +135,10 @@ public class MainActivity extends Activity {
         barcodeView.setLayoutParams(params);
         layout.addView(barcodeView);
 
-        // Buttons layout
+        // Buttons layout (horizontal scrollable)
+        android.widget.HorizontalScrollView buttonScrollLayout = new android.widget.HorizontalScrollView(this);
+        buttonScrollLayout.setFillViewport(true);
+
         android.widget.LinearLayout buttonLayout = new android.widget.LinearLayout(this);
         buttonLayout.setOrientation(android.widget.LinearLayout.HORIZONTAL);
         buttonLayout.setPadding(0, 16, 0, 0);
@@ -127,7 +158,7 @@ public class MainActivity extends Activity {
         previewButton = new Button(this);
         previewButton.setText("Preview");
         previewButton.setVisibility(View.GONE);
-        previewButton.setOnClickListener(v -> showPreview());
+        previewButton.setOnClickListener(v -> togglePreview());
         buttonLayout.addView(previewButton);
 
         copyButton = new Button(this);
@@ -136,7 +167,35 @@ public class MainActivity extends Activity {
         copyButton.setOnClickListener(v -> copyToClipboard());
         buttonLayout.addView(copyButton);
 
-        layout.addView(buttonLayout);
+        buttonScrollLayout.addView(buttonLayout);
+        layout.addView(buttonScrollLayout);
+
+        // Footer with build info
+        TextView footerText = new TextView(this);
+        footerText.setText("Build: " + getBuildInfo());
+        footerText.setTextSize(10);
+        footerText.setTextColor(0xFF888888);
+        footerText.setGravity(android.view.Gravity.CENTER);
+        footerText.setPadding(0, 8, 0, 0);
+        layout.addView(footerText);
+
+        // QR display container (for relay mode)
+        qrContainerLayout = new LinearLayout(this);
+        qrContainerLayout.setOrientation(android.widget.LinearLayout.VERTICAL);
+        qrContainerLayout.setPadding(0, 16, 0, 0);
+        qrContainerLayout.setVisibility(View.GONE);
+
+        qrDisplayView = new ImageView(this);
+        qrDisplayView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        android.widget.LinearLayout.LayoutParams qrParams =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                        900  // Larger height for bigger QR
+                );
+        qrDisplayView.setLayoutParams(qrParams);
+        qrContainerLayout.addView(qrDisplayView);
+
+        layout.addView(qrContainerLayout);
 
         // Text content view (scrollable)
         textScrollView = new ScrollView(this);
@@ -179,6 +238,9 @@ public class MainActivity extends Activity {
             // Invalid frame, skip
             return;
         }
+
+        // Store raw QR chunk for relay
+        scannedChunks.add(data);
 
         frameCount++;
         frameCountText.setText("Frames: " + frameCount);
@@ -241,6 +303,14 @@ public class MainActivity extends Activity {
 
             // Set text content
             textContentView.setText(decodedData);
+
+            // Pre-generate all QR bitmaps in background to avoid UI hang
+            generateQRBitmapsInBackground();
+
+            // Reset preview mode - start at mode 2 (next will be 0=Preview)
+            previewMode = 2;
+            previewButton.setText("Preview");
+            textScrollView.setVisibility(View.GONE);  // Hidden until Preview is clicked
 
             // Show buttons
             downloadButton.setVisibility(View.VISIBLE);
@@ -315,10 +385,14 @@ public class MainActivity extends Activity {
     }
 
     private void resetDecoder() {
+        stopRelay();
         decoder.reset();
         frameCount = 0;
+        scannedChunks.clear();
+        qrBitmaps.clear();
         decodedData = null;
         decodedFilename = null;
+        previewMode = 0;
         frameCountText.setText("Frames: 0");
         statusText.setText("Reset. Point camera at QR code.");
         progressBar.setProgress(0);
@@ -327,16 +401,43 @@ public class MainActivity extends Activity {
         previewButton.setVisibility(View.GONE);
         copyButton.setVisibility(View.GONE);
         textScrollView.setVisibility(View.GONE);
+        qrContainerLayout.setVisibility(View.GONE);
+        barcodeView.setVisibility(View.VISIBLE);
         barcodeView.resume();
     }
 
-    private void showPreview() {
-        if (textScrollView.getVisibility() == View.VISIBLE) {
-            textScrollView.setVisibility(View.GONE);
-            previewButton.setText("Preview");
-        } else {
-            textScrollView.setVisibility(View.VISIBLE);
-            previewButton.setText("Hide");
+    private void togglePreview() {
+        // Cycle through modes: 0=Preview(text) -> 1=Relay -> 2=Hide -> 0=Preview
+        previewMode = (previewMode + 1) % 3;
+
+        // Stop relay if running
+        if (previewMode != 1) {
+            stopRelay();
+        }
+
+        switch (previewMode) {
+            case 0: // Show text preview
+                qrContainerLayout.setVisibility(View.GONE);
+                textScrollView.setVisibility(View.VISIBLE);
+                previewButton.setText("Relay");
+                statusText.setText("Complete! " + decodedFilename);
+                break;
+
+            case 1: // Relay mode
+                stopRelay();
+                textScrollView.setVisibility(View.GONE);
+                qrContainerLayout.setVisibility(View.VISIBLE);
+                previewButton.setText("Hide");
+                statusText.setText("Relaying... Point another camera here");
+                startRelay();
+                break;
+
+            case 2: // Hide all
+                qrContainerLayout.setVisibility(View.GONE);
+                textScrollView.setVisibility(View.GONE);
+                previewButton.setText("Preview");
+                statusText.setText("Complete! " + decodedFilename);
+                break;
         }
     }
 
@@ -379,5 +480,98 @@ public class MainActivity extends Activity {
         if (barcodeView != null) {
             barcodeView.pause();
         }
+        stopRelay();
+    }
+
+    private void startRelay() {
+        if (scannedChunks.isEmpty() || qrBitmaps.isEmpty()) {
+            Toast.makeText(this, "No data to relay", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        isRelaying = true;
+        currentRelayFrame = 0;
+
+        // Start frame animation with pre-generated bitmaps
+        relayRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (!isRelaying) return;
+
+                // Use pre-generated QR bitmap
+                Bitmap qrBitmap = qrBitmaps.get(currentRelayFrame);
+                if (qrBitmap != null) {
+                    qrDisplayView.setImageBitmap(qrBitmap);
+                }
+
+                currentRelayFrame = (currentRelayFrame + 1) % qrBitmaps.size();
+
+                // Schedule next frame
+                relayHandler.postDelayed(this, FRAME_DELAY_MS);
+            }
+        };
+
+        relayHandler.post(relayRunnable);
+    }
+
+    private void generateQRBitmaps() {
+        qrBitmaps.clear();
+        for (String chunk : scannedChunks) {
+            Bitmap qrBitmap = generateQRCode(chunk);
+            if (qrBitmap != null) {
+                qrBitmaps.add(qrBitmap);
+            }
+        }
+        android.util.Log.d("txqr", "Generated " + qrBitmaps.size() + " QR bitmaps");
+    }
+
+    private void generateQRBitmapsInBackground() {
+        android.util.Log.d("txqr", "Starting background QR bitmap generation...");
+        statusText.setText("Complete! Pre-generating QR bitmaps...");
+
+        new Thread(() -> {
+            generateQRBitmaps();
+
+            // Update UI on main thread after completion
+            relayHandler.post(() -> {
+                statusText.setText("Complete! " + decodedFilename);
+                android.util.Log.d("txqr", "Background QR bitmap generation completed");
+            });
+        }).start();
+    }
+
+    private void stopRelay() {
+        isRelaying = false;
+        if (relayHandler != null && relayRunnable != null) {
+            relayHandler.removeCallbacks(relayRunnable);
+        }
+    }
+
+    private Bitmap generateQRCode(String content) {
+        try {
+            QRCodeWriter qrCodeWriter = new QRCodeWriter();
+            BitMatrix bitMatrix = qrCodeWriter.encode(content, BarcodeFormat.QR_CODE, QR_SIZE, QR_SIZE);
+
+            int width = bitMatrix.getWidth();
+            int height = bitMatrix.getHeight();
+            Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.RGB_565);
+
+            for (int x = 0; x < width; x++) {
+                for (int y = 0; y < height; y++) {
+                    bitmap.setPixel(x, y, bitMatrix.get(x, y) ? Color.BLACK : Color.WHITE);
+                }
+            }
+
+            return bitmap;
+        } catch (Exception e) {
+            android.util.Log.e("txqr", "Error generating QR: " + e.getMessage());
+            return null;
+        }
+    }
+
+    private String getBuildInfo() {
+        // Simple build info - you can enhance this with actual build time
+        java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm");
+        return sdf.format(new java.util.Date());
     }
 }
