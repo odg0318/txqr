@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/flate"
 	"encoding/base64"
 	"flag"
 	"fmt"
@@ -30,7 +32,16 @@ func main() {
 		log.Fatalf("Read input file failed: %v", err)
 	}
 
-	str := base64.StdEncoding.EncodeToString(data)
+	// Compress data using flate
+	var compressed bytes.Buffer
+	w, _ := flate.NewWriter(&compressed, flate.DefaultCompression)
+	w.Write(data)
+	w.Close()
+
+	// Encode as "<filename>\n<base64_compressed_data>" (same format as GIF)
+	payload := filename + "\n" + base64.StdEncoding.EncodeToString(compressed.Bytes())
+	str := base64.StdEncoding.EncodeToString([]byte(payload))
+
 	chunks, err := txqr.NewEncoder(*split).Encode(str)
 	if err != nil {
 		log.Fatalf("Encode failed: %v", err)
@@ -44,9 +55,9 @@ func main() {
 			config := qrterminal.Config{
 				Level:     qrterminal.M,
 				Writer:    os.Stdout,
-				BlackChar: qrterminal.WHITE,
-				WhiteChar: qrterminal.BLACK,
-				QuietZone: 1,
+				BlackChar: qrterminal.BLACK,
+				WhiteChar: qrterminal.WHITE,
+				QuietZone: 2,
 			}
 
 			clearScreen()

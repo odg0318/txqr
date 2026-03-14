@@ -1,0 +1,97 @@
+# Multi-stage Dockerfile for Android builds
+# Builds txqr decoder AAR and/or APK
+#
+# Usage:
+#   make aar   # Build AAR only
+#   make apk   # Build APK (includes AAR)
+
+# ============================================================================
+# BASE STAGE - Common dependencies for both AAR and APK
+# ============================================================================
+FROM golang:1.25-bookworm AS base
+
+# Android SDK/NDK environment
+ENV ANDROID_HOME=/opt/android-sdk
+ENV ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/26.1.10909125
+ENV PATH=${PATH}:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools
+
+# Install required packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        unzip \
+        wget \
+        openjdk-17-jdk-headless \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download Android command-line tools
+RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
+    wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdline-tools.zip && \
+    unzip -q /tmp/cmdline-tools.zip -d ${ANDROID_HOME}/cmdline-tools && \
+    mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
+    rm /tmp/cmdline-tools.zip
+
+# Accept licenses and install NDK + platform
+RUN yes | sdkmanager --licenses > /dev/null 2>&1 && \
+    sdkmanager "ndk;26.1.10909125" "platforms;android-34" "build-tools;34.0.0"
+
+# ============================================================================
+# AAR STAGE - Builds the AAR library
+# ============================================================================
+FROM base AS aar-builder
+
+WORKDIR /src
+COPY . .
+
+# Prepare Go modules
+RUN go mod tidy
+
+# Install gomobile tools
+RUN go install golang.org/x/mobile/cmd/gomobile@latest && \
+    go install golang.org/x/mobile/cmd/gobind@latest && \
+    go get golang.org/x/mobile/bind@latest && \
+    gomobile init
+
+# Build AAR
+RUN gomobile bind \
+        -target=android \
+        -androidapi 21 \
+        -o txqr.aar \
+        ./mobile
+
+# Output AAR to known location
+RUN mkdir -p /output && cp txqr.aar /output/
+
+# ============================================================================
+# APK STAGE - Builds the APK using AAR from previous stage
+# ============================================================================
+FROM base AS apk-builder
+
+WORKDIR /src
+COPY . .
+
+# Copy AAR from aar-builder stage
+COPY --from=aar-builder /src/txqr.aar ./android/app/libs/
+
+# Install gradle
+RUN wget -q https://services.gradle.org/distributions/gradle-8.4-bin.zip -O /tmp/gradle.zip && \
+    unzip -q /tmp/gradle.zip -d /opt && \
+    rm /tmp/gradle.zip
+
+ENV GRADLE_HOME=/opt/gradle-8.4
+ENV PATH=${PATH}:${GRADLE_HOME}/bin
+
+# Build APK
+WORKDIR /src/android
+RUN gradle wrapper --gradle-version 8.4
+RUN ./gradlew assembleDebug
+
+# Output APK to known location
+RUN mkdir -p /output && cp app/build/outputs/apk/debug/app-debug.apk /output/txqr.apk
+
+# ============================================================================
+# OUTPUT STAGE - Minimal image for extracting artifacts
+# ============================================================================
+FROM scratch AS aar
+COPY --from=aar-builder /output/txqr.aar /txqr.aar
+
+FROM scratch AS apk
+COPY --from=apk-builder /output/txqr.apk /txqr.apk
