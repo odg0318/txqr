@@ -64,12 +64,12 @@ func runWrite() {
 
 	// Compress data using flate
 	var compressed bytes.Buffer
-	w, _ := flate.NewWriter(&compressed, flate.DefaultCompression)
+	w, _ := flate.NewWriter(&compressed, flate.BestCompression)
 	w.Write(data)
 	w.Close()
 
-	// Encode as "<filename>\n<base64_compressed_data>"
-	payload := filename + "\n" + base64.StdEncoding.EncodeToString(compressed.Bytes())
+	// Encode as "<filename>\n<compressed_data>" then base64 once (simplified)
+	payload := filename + "\n" + string(compressed.Bytes())
 	str := base64.StdEncoding.EncodeToString([]byte(payload))
 
 	chunks, err := txqr.NewEncoder(*splitSize).Encode(str)
