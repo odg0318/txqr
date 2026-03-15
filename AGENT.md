@@ -2,6 +2,10 @@
 
 This file provides comprehensive context for AI agents working on the txqr codebase.
 
+**Quick Reference:**
+- Latest session summary: [memory/MEMORY.md](memory/MEMORY.md)
+- Build processes: [SKILLS.md](SKILLS.md)
+
 ## Project Overview
 
 **TXQR (Transfer via QR)** is a data transfer protocol using animated QR codes with fountain codes for error correction. It allows robust data transmission even when some QR frames are lost or corrupted during transmission.
@@ -22,7 +26,7 @@ This file provides comprehensive context for AI agents working on the txqr codeb
 | QR Generation | github.com/skip2/go-qrcode | Encoding |
 | QR Decoding | github.com/makiuchi-d/gozxing | Decoding |
 | QR Terminal | github.com/mdp/qrterminal | ASCII display |
-| Android | Kotlin + Gradle 8.4 | API 21+, SDK 34 |
+| Android | Java + Gradle 8.4 | API 21+, SDK 34 |
 | iOS | Swift via gomobile | Framework bindings |
 | Web | GopherJS + Vecty | Testing interface |
 | Docker | Multi-stage builds | Android toolchain |
@@ -48,7 +52,8 @@ txqr/
 │       └── src/main/
 │           └── java/com/github/divan/txqr/
 ├── mobile/                     # gomobile bindings for iOS/Android
-│   └── decode.go               # Mobile decoder with progress tracking
+│   ├── decode.go               # Mobile decoder with progress tracking
+│   └── encode.go               # Mobile encoder with StringList wrapper
 ├── qr/                         # QR code generation/decoding library
 │   ├── qr.go                   # QR encoding with error levels
 │   └── testdata/               # Test QR images
@@ -77,10 +82,15 @@ case "version":     PrintVersion()
 - Supports file arguments and stdin pipes
 - Contains `AnimatedGifFromChunks()` function
 
-**read.go** - Read/decode functionality (560 lines)
+**read.go** - Read/decode functionality (647 lines)
 - Web server for QR scanning
 - WebSocket for real-time scanner updates
 - HTML interface with camera access
+- **New UI layout** (2024-03):
+  - Scanner + Button panel in horizontal flex layout
+  - Download, Reset, Preview, Copy buttons
+  - Preview area shown below on demand
+  - Responsive max-width: 900px
 
 **terminal.go** - Terminal display utilities (38 lines)
 ```go
@@ -118,12 +128,12 @@ const (
 
 ## Architecture Patterns
 
-### Data Encoding Flow
+### Data Encoding Flow (Simplified - Single Base64)
 
 1. **Read data** from file or stdin
-2. **Compress** with flate (default compression)
-3. **Encode** as: `<filename>\n<base64_compressed_data>`
-4. **Double base64 encode** entire payload
+2. **Compress** with flate (BEST_COMPRESSION = level 9)
+3. **Encode** as: `<filename>\n<compressed_data>`
+4. **Base64 encode** once (simplified from double encoding)
 5. **Split** into chunks with fountain codes
 6. **Generate** QR code for each chunk
 
@@ -131,15 +141,28 @@ const (
 
 ```
 Original Data
-    ↓ (flate compress)
+    ↓ (flate compress, BEST_COMPRESSION)
 Compressed Data
-    ↓ (base64 encode)
-<filename>\n<base64_compressed_data>
-    ↓ (base64 encode again)
-Double-encoded payload
+    ↓ (prepend filename)
+<filename>\n<compressed_data>
+    ↓ (base64 encode ONCE)
+Base64-encoded payload
     ↓ (fountain encode + chunk split)
 QR code chunks (animated display)
 ```
+
+### Encoding Compatibility
+
+**Cross-Platform Encoding:**
+- **Go CLI**: Uses raw deflate (no zlib header) via `flate.NewWriter`
+- **Android**: Uses raw deflate via `Deflater(level, true)` - nowrap=true
+- **Character Encoding**: ISO-8859-1 for byte→String conversion (1:1 mapping)
+
+**Key Points:**
+- Raw deflate format (not zlib) for consistency
+- Single base64 encoding (simplified from double)
+- ISO-8859-1 preserves raw bytes (0-255 → 1:1 character mapping)
+- BEST_COMPRESSION for smaller payloads (fewer QR frames)
 
 ### Error Correction
 
@@ -183,6 +206,12 @@ import (
 ### Build CLI
 
 ```bash
+# Docker build (recommended - cross-platform)
+make cli                    # Builds for darwin/arm64 (Apple Silicon)
+make cli CLI_GOOS=darwin CLI_GOARCH=amd64   # Intel Mac
+make cli CLI_GOOS=linux CLI_GOARCH=amd64    # Linux
+
+# Local build (quick testing)
 go build -o txqr ./cmd/txqr
 ```
 
@@ -222,25 +251,44 @@ txqr version
 
 ## Recent Changes (Context for Future Work)
 
-### Terminal Display (Current Session)
-- Changed default: `terminal=true` (was `false`)
-- Added `--gif` flag for explicit GIF mode
-- `-o` flag now enables GIF mode automatically
-- Usage: `txqr write myfile.txt` → terminal, `txqr write -o out.gif myfile.txt` → GIF
+### Encoding Simplification (2024-03)
+- **Single base64 encoding** (was double base64)
+  - Reduces payload size by ~33%
+  - Fewer QR frames needed
+  - Format: `<filename>\n<compressed_data>` → base64 → fountain codes
+- **Raw deflate format** (not zlib)
+  - Go: `flate.NewWriter` (raw deflate by default)
+  - Android: `Deflater(level, true)` - nowrap=true
+- **BEST_COMPRESSION** for consistency
+- **ISO-8859-1** character encoding for byte preservation
 
-### Command Aliases
-- `write` can be shortened to `w`
-- `read` can be shortened to `r`
+### CLI Docker Build System (2024-03)
+- **Dockerfile** - Multi-platform CLI builds
+  - ARG support for GOOS/GOARCH
+  - Defaults: darwin/arm64 (Apple Silicon)
+- **Makefile targets**:
+  - `make cli` - Build CLI via Docker
+  - `make aar` - Build Android AAR
+  - `make apk` - Build Android APK
+  - `make android` - Build both AAR and APK
 
-### File Organization
-- Refactored `main.go` into multiple files by functionality
-- Moved GIF functions from `gif.go` to `write.go`
-- Deleted `gif.go` (consolidated)
+### Web UI Redesign (2024-03)
+- **New layout**: Scanner (left) + Button panel (right)
+- **4 action buttons**: Download, Reset, Preview, Copy
+- **Preview behavior**: Click to show text content below
+- **Responsive design**: flex layout with gap spacing
 
-### Android Recognition Fix
-- Fixed encoding format in `txqr-ascii` to match GIF (compressed + double base64)
-- Fixed color inversion: `BlackChar: BLACK, WhiteChar: WHITE`
-- Increased QuietZone to 2 for better recognition
+### Android UTF-8 Text Detection Fix (2024-03)
+- **Fixed `looksLikeText()` function** to properly detect UTF-8 text
+- **Bug**: Original condition `b < 32 && b < 0` incorrectly marked UTF-8 bytes as non-printable
+- **Fix**: `boolean isPrintable = (b >= 9 && b <= 13) || (b >= 32 && b <= 126) || (b < 0)`
+- **Result**: Korean, Chinese, Japanese text now properly detected as text
+
+### Legacy Changes
+- Terminal display default: `terminal=true`
+- Command aliases: `write` → `w`, `read` → `r`
+- File organization: Refactored main.go into multiple files
+- Android recognition: Fixed color inversion, increased QuietZone
 
 ## Development Notes
 
@@ -331,22 +379,35 @@ implementation 'com.github.bumptech.glide:glide:4.16.0'
 implementation(name: 'txqr', ext: 'aar')  // gomobile binding
 ```
 
+**Android Imports (MainActivity.java):**
+```java
+import android.app.Dialog;                    // Modal popup
+import android.view.inputmethod.InputMethodManager;  // Keyboard control
+import java.util.zip.Deflater;                // Flate compression
+```
+
 **Mobile (gomobile bindings):**
 - `mobile/decode.go` - Decoder with progress tracking
 - `mobile/encode.go` - Encoder bindings (prepared for Feature 2)
 
 #### Build Process
 
-**AAR Build (gomobile binding):**
+**Use make command (recommended):**
 ```bash
+make aar           # Build Android AAR library
+make apk           # Build Android APK (includes AAR)
+make android       # Build both AAR and APK
+```
+
+**Manual Docker build:**
+```bash
+# AAR Build (gomobile binding)
 docker build --platform=linux/amd64 \
   -f Dockerfile.android \
   --target aar-builder \
   -t txqr-aar .
-```
 
-**APK Build:**
-```bash
+# APK Build
 docker build --platform=linux/amd64 \
   -f Dockerfile.android \
   --target apk-builder \
@@ -357,6 +418,20 @@ docker build --platform=linux/amd64 \
 ```bash
 adb uninstall com.github.divan.txqr 2>/dev/null; adb install txqr.apk
 ```
+
+#### Build Error Handling (IMPORTANT)
+
+If APK or AAR build fails during `make apk` or `make aar`:
+1. **STOP the build process immediately**
+2. **DO NOT attempt to retry or fix automatically**
+3. **Report the full error message to the user**
+4. Wait for user instructions before proceeding
+
+This is critical because build failures may indicate:
+- Dependency issues requiring manual intervention
+- Docker platform problems
+- SDK/NDK version mismatches
+- Gomobile binding errors
 
 #### Known Issues & Solutions
 
@@ -399,9 +474,11 @@ mobile/
 **사용 흐름:**
 1. 앱 실행 → "Write" 탭 선택
 2. Textarea에 텍스트 입력
-3. "Generate QR" 버튼 클릭
-4. Animated QR 표시
+3. "GENERATE" 버튼 클릭
+4. Modal 팝업에 Animated QR 표시
 5. 다른 기기에서 스캔
+6. "Close" 버튼으로 팝업 닫기
+7. "CLEAR" 버튼으로 텍스트 지우기
 
 ### Technical Implementation
 
@@ -438,12 +515,24 @@ Animated QR display
 | `readTabButton` (Button) | Switch to read mode |
 | `writeTabButton` (Button) | Switch to write mode |
 | `textInput` (EditText) | Multi-line text input |
-| `generateButton` (Button) | Generate QR from text |
+| `generateButton` (Button) | "GENERATE" - Generate QR from text |
+| `clearButton` (Button) | "CLEAR" - Clear text input |
+| `qrDialog` (Dialog) | Modal popup for QR display |
+| `qrDialogImageView` (ImageView) | QR display in dialog |
+| `qrDialogBitmaps` (ArrayList<Bitmap>) | Pre-generated QR bitmaps for dialog |
+| `qrDialogHandler/Runnable` | Dialog animation control |
 
 **Encoding Methods:**
 - `encodePayload(text)` - Compress + double base64 encoding
 - `compressFlate(data)` - Flate compression using Deflater
 - `generateQRFromText()` - Orchestrates encoding + QR generation
+- `clearWriteInput()` - Clears text input and shows toast
+
+**Modal Dialog Methods:**
+- `showQRDialog()` - Creates and shows modal dialog with QR animation
+- `createQRDialog()` - Programmatically creates dialog layout
+- `startQRDialogAnimation()` - Starts QR animation loop in dialog
+- `stopQRDialogAnimation()` - Stops dialog animation
 
 #### gomobile Encoder Bindings
 
@@ -483,17 +572,29 @@ for (int i = 0; i < (int)chunks.size(); i++) {
 1. User clicks "Write" tab
 2. Camera pauses, scan stops
 3. Textarea appears for input
-4. User enters text and clicks "Generate QR"
+4. User enters text and clicks "GENERATE"
 5. Background process:
    - Encodes payload (compress + base64)
    - Calls gomobile encoder for fountain codes
    - Generates QR bitmaps using ZXing
-   - Displays animated QR
+   - Shows modal popup with animated QR
+6. User can click "Close" to dismiss dialog
+7. User can click "CLEAR" to clear text input
+
+**Modal Dialog QR Display:**
+- Full-screen modal dialog with black background
+- Title: "Scan this QR code"
+- QR ImageView (800px height, FIT_CENTER)
+- Frame count info: "QR frames: N"
+- Close button at bottom
+- Dismiss animation when dialog is closed
+- Separate from relay mode QR display (no conflicts)
 
 **Animation:**
-- Reuses `startQRAnimation()` from relay mode
-- Same frame-by-frame bitmap switching
+- Separate animation loop for dialog (`qrDialogHandler`, `qrDialogRunnable`)
+- Frame-by-frame bitmap switching
 - 20 FPS (50ms delay)
+- Independent from relay mode animation
 
 #### Dependencies
 
@@ -512,11 +613,17 @@ for (int i = 0; i < (int)chunks.size(); i++) {
 **Issue:** gomobile method naming convention
 - **Solution:** Go exported methods (uppercase) → Java lowercase (`Encode()` → `encode()`)
 
+**Issue:** QR not visible for long text (inline display issue)
+- **Solution:** Modal popup dialog for QR display (more prominent, separate from main UI)
+
 ### File Structure
 
 ```
 android/app/src/main/java/com/github/divan/txqr/
-└── MainActivity.java          # Main activity with read/write modes
+└── MainActivity.java          # Main activity with read/write/relay modes
+
+android/app/libs/
+└── txqr.aar                   # gomobile binding library
 
 mobile/
 ├── decode.go                  # gomobile decoder bindings
@@ -528,12 +635,20 @@ mobile/
 **Test Write Mode Flow:**
 1. Open app → Click "Write" tab
 2. Enter text: "Hello from Android!"
-3. Click "Generate QR"
-4. Verify animated QR appears
+3. Click "GENERATE"
+4. Verify modal dialog appears with animated QR
 5. Scan with another device
 6. Verify received text matches original
+7. Click "Close" to dismiss dialog
+8. Click "CLEAR" to verify text is cleared
 
 **Test Tab Switching:**
 1. Read → Write → Read → Verify camera resumes
-2. Generate QR → Switch to Read → Verify QR stops
+2. Generate QR → Switch to Read → Verify dialog closes
 3. Switch during relay → Verify relay stops
+
+**Test Long Text:**
+1. Enter long text (500+ characters)
+2. Click "GENERATE"
+3. Verify modal dialog shows with multiple QR frames
+4. Verify animation loops smoothly

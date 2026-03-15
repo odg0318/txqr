@@ -74,6 +74,7 @@ public class MainActivity extends Activity {
     private int frameCount = 0;
     private String decodedData = null;
     private String decodedFilename = null;
+    private byte[] decodedBytes = null; // Store raw bytes for binary files
 
     // Store raw scanned QR chunks for relay
     private ArrayList<String> scannedChunks = new ArrayList<>();
@@ -387,11 +388,12 @@ public class MainActivity extends Activity {
             android.util.Log.d("txqr", "Fountain result length: " + b64str.length());
             android.util.Log.d("txqr", "Fountain result preview: " + b64str.substring(0, Math.min(100, b64str.length())));
 
-            // First base64 decode (outer layer)
+            // Base64 decode (single layer - simplified encoding)
             byte[] raw = Base64.decode(b64str, Base64.DEFAULT);
-            String payload = new String(raw);
+            // Use ISO-8859-1 to preserve raw bytes (matches Go's string(byte[]) behavior)
+            String payload = new String(raw, java.nio.charset.StandardCharsets.ISO_8859_1);
 
-            // Parse "<filename>\n<base64_data>"
+            // Parse "<filename>\n<compressed_data>"
             int newlineIdx = payload.indexOf('\n');
             if (newlineIdx == -1) {
                 statusText.setText("Error: Invalid data format (no newline)");
@@ -400,37 +402,53 @@ public class MainActivity extends Activity {
             }
 
             decodedFilename = payload.substring(0, newlineIdx);
-            String b64Data = payload.substring(newlineIdx + 1);
+            byte[] compressed = payload.substring(newlineIdx + 1).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
 
             android.util.Log.d("txqr", "Filename: " + decodedFilename);
-            android.util.Log.d("txqr", "Base64 data length: " + b64Data.length());
-
-            // Second base64 decode (inner layer - compressed data)
-            byte[] compressed = Base64.decode(b64Data, Base64.DEFAULT);
+            android.util.Log.d("txqr", "Compressed data length: " + compressed.length);
 
             // Flate decompress
             byte[] decompressed = decompressFlate(compressed);
 
-            decodedData = new String(decompressed);
+            // Store raw bytes for download
+            decodedBytes = decompressed;
+
+            boolean isText = isTextFile(decodedFilename) || looksLikeText(decompressed);
+
+            if (isText) {
+                decodedData = new String(decompressed);
+            } else {
+                decodedData = null; // Binary data - don't store as string
+            }
+
             statusText.setText("Complete! " + decodedFilename + " (" + decompressed.length + " bytes)");
             progressBar.setProgress(100);
 
-            // Set text content
-            textContentView.setText(decodedData);
+            // Set text content only if it's actually text
+            if (isText && decodedData != null) {
+                textContentView.setText(decodedData);
+                previewButton.setText("Preview");
+            } else {
+                textContentView.setText("");
+                previewButton.setText("Binary file");
+                previewButton.setVisibility(View.GONE); // Hide preview button for binary
+                copyButton.setVisibility(View.GONE); // Hide copy button for binary
+            }
 
             // Pre-generate all QR bitmaps in background to avoid UI hang
             generateQRBitmapsInBackground();
 
             // Reset preview mode - start at mode 2 (next will be 0=Preview)
             previewMode = 2;
-            previewButton.setText("Preview");
             textScrollView.setVisibility(View.GONE);  // Hidden until Preview is clicked
 
             // Show buttons
             downloadButton.setVisibility(View.VISIBLE);
             resetButton.setVisibility(View.VISIBLE);
-            previewButton.setVisibility(View.VISIBLE);
-            copyButton.setVisibility(View.VISIBLE);
+            if (isText) {
+                previewButton.setVisibility(View.VISIBLE);
+                copyButton.setVisibility(View.VISIBLE);
+            }
 
             Toast.makeText(this, "Decoding completed!", Toast.LENGTH_SHORT).show();
 
@@ -475,7 +493,7 @@ public class MainActivity extends Activity {
     }
 
     private void downloadFile() {
-        if (decodedData == null || decodedFilename == null) {
+        if ((decodedData == null && decodedBytes == null) || decodedFilename == null) {
             Toast.makeText(this, "No data to download", Toast.LENGTH_SHORT).show();
             return;
         }
@@ -488,9 +506,15 @@ public class MainActivity extends Activity {
                     decodedFilename
             );
 
-            java.io.FileWriter writer = new java.io.FileWriter(dir);
-            writer.write(decodedData);
-            writer.close();
+            java.io.FileOutputStream fos = new java.io.FileOutputStream(dir);
+            if (decodedData != null) {
+                // Text data
+                fos.write(decodedData.getBytes());
+            } else if (decodedBytes != null) {
+                // Binary data
+                fos.write(decodedBytes);
+            }
+            fos.close();
 
             Toast.makeText(this, "Saved to: " + dir.getAbsolutePath(), Toast.LENGTH_LONG).show();
         } catch (IOException e) {
@@ -506,6 +530,7 @@ public class MainActivity extends Activity {
         qrBitmaps.clear();
         decodedData = null;
         decodedFilename = null;
+        decodedBytes = null;
         previewMode = 0;
         frameCountText.setText("Frames: 0");
         statusText.setText("Reset. Point camera at QR code.");
@@ -739,18 +764,16 @@ public class MainActivity extends Activity {
         // 1. Flate compress
         byte[] compressed = compressFlate(text.getBytes());
 
-        // 2. Base64 encode
-        String b64Data = Base64.encodeToString(compressed, Base64.NO_WRAP);
+        // 2. Add filename (default: "stdin" to match CLI) - single base64 encoding
+        String payload = "stdin\n" + new String(compressed, java.nio.charset.StandardCharsets.ISO_8859_1);
 
-        // 3. Add filename (default: "text.txt")
-        String payload = "text.txt\n" + b64Data;
-
-        // 4. Double base64 encode
-        return Base64.encodeToString(payload.getBytes(), Base64.NO_WRAP);
+        // 3. Base64 encode once (simplified - more efficient)
+        return Base64.encodeToString(payload.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1), Base64.DEFAULT);
     }
 
     private byte[] compressFlate(byte[] data) throws IOException {
-        java.util.zip.Deflater deflater = new java.util.zip.Deflater(java.util.zip.Deflater.BEST_COMPRESSION);
+        // Use raw deflate (no zlib header) to match Go's flate.NewWriter
+        java.util.zip.Deflater deflater = new java.util.zip.Deflater(java.util.zip.Deflater.BEST_COMPRESSION, true);
         deflater.setInput(data);
         deflater.finish();
 
@@ -950,5 +973,163 @@ public class MainActivity extends Activity {
         // Simple build info - you can enhance this with actual build time
         java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm");
         return sdf.format(new java.util.Date());
+    }
+
+    // ===== Text/Binary Detection Helpers =====
+
+    private static final java.util.Set<String> TEXT_EXTENSIONS = new java.util.HashSet<>();
+    static {
+        // Common text file extensions
+        TEXT_EXTENSIONS.add(".txt");
+        TEXT_EXTENSIONS.add(".md");
+        TEXT_EXTENSIONS.add(".markdown");
+        TEXT_EXTENSIONS.add(".json");
+        TEXT_EXTENSIONS.add(".xml");
+        TEXT_EXTENSIONS.add(".html");
+        TEXT_EXTENSIONS.add(".htm");
+        TEXT_EXTENSIONS.add(".css");
+        TEXT_EXTENSIONS.add(".js");
+        TEXT_EXTENSIONS.add(".ts");
+        TEXT_EXTENSIONS.add(".jsx");
+        TEXT_EXTENSIONS.add(".tsx");
+        TEXT_EXTENSIONS.add(".go");
+        TEXT_EXTENSIONS.add(".py");
+        TEXT_EXTENSIONS.add(".rs");
+        TEXT_EXTENSIONS.add(".c");
+        TEXT_EXTENSIONS.add(".cpp");
+        TEXT_EXTENSIONS.add(".cc");
+        TEXT_EXTENSIONS.add(".cxx");
+        TEXT_EXTENSIONS.add(".h");
+        TEXT_EXTENSIONS.add(".hpp");
+        TEXT_EXTENSIONS.add(".java");
+        TEXT_EXTENSIONS.add(".kt");
+        TEXT_EXTENSIONS.add(".kts");
+        TEXT_EXTENSIONS.add(".swift");
+        TEXT_EXTENSIONS.add(".sh");
+        TEXT_EXTENSIONS.add(".bash");
+        TEXT_EXTENSIONS.add(".zsh");
+        TEXT_EXTENSIONS.add(".fish");
+        TEXT_EXTENSIONS.add(".ps1");
+        TEXT_EXTENSIONS.add(".yaml");
+        TEXT_EXTENSIONS.add(".yml");
+        TEXT_EXTENSIONS.add(".toml");
+        TEXT_EXTENSIONS.add(".ini");
+        TEXT_EXTENSIONS.add(".cfg");
+        TEXT_EXTENSIONS.add(".conf");
+        TEXT_EXTENSIONS.add(".config");
+        TEXT_EXTENSIONS.add(".log");
+        TEXT_EXTENSIONS.add(".csv");
+        TEXT_EXTENSIONS.add(".tsv");
+        TEXT_EXTENSIONS.add(".sql");
+        TEXT_EXTENSIONS.add(".graphql");
+        TEXT_EXTENSIONS.add(".graphqls");
+        TEXT_EXTENSIONS.add(".gql");
+        TEXT_EXTENSIONS.add(".proto");
+        TEXT_EXTENSIONS.add(".Makefile");
+        TEXT_EXTENSIONS.add(".Dockerfile");
+        TEXT_EXTENSIONS.add(".dockerignore");
+        TEXT_EXTENSIONS.add(".gitignore");
+        TEXT_EXTENSIONS.add(".gitattributes");
+        TEXT_EXTENSIONS.add(".gitmodules");
+        TEXT_EXTENSIONS.add(".editorconfig");
+        TEXT_EXTENSIONS.add(".env");
+        TEXT_EXTENSIONS.add(".env.local");
+        TEXT_EXTENSIONS.add(".rfc");
+        TEXT_EXTENSIONS.add(".rst");
+        TEXT_EXTENSIONS.add(".tex");
+        TEXT_EXTENSIONS.add(".lua");
+        TEXT_EXTENSIONS.add(".rb");
+        TEXT_EXTENSIONS.add(".php");
+        TEXT_EXTENSIONS.add(".scala");
+        TEXT_EXTENSIONS.add(".sc");
+        TEXT_EXTENSIONS.add(".clj");
+        TEXT_EXTENSIONS.add(".cljs");
+        TEXT_EXTENSIONS.add(".edn");
+        TEXT_EXTENSIONS.add(".vim");
+        TEXT_EXTENSIONS.add(".nix");
+        TEXT_EXTENSIONS.add(".pl");
+        TEXT_EXTENSIONS.add(".pm");
+        TEXT_EXTENSIONS.add(".r");
+        TEXT_EXTENSIONS.add(".R");
+        TEXT_EXTENSIONS.add(".m");
+        TEXT_EXTENSIONS.add(".mm");
+        TEXT_EXTENSIONS.add(".dart");
+        TEXT_EXTENSIONS.add(".groovy");
+        TEXT_EXTENSIONS.add(".gradle");
+        TEXT_EXTENSIONS.add(".props");
+        TEXT_EXTENSIONS.add(".properties");
+        TEXT_EXTENSIONS.add(".bat");
+        TEXT_EXTENSIONS.add(".cmd");
+        TEXT_EXTENSIONS.add(".powershell");
+        TEXT_EXTENSIONS.add(".pem");
+        TEXT_EXTENSIONS.add(".crt");
+        TEXT_EXTENSIONS.add(".key");
+        TEXT_EXTENSIONS.add(".pub");
+        TEXT_EXTENSIONS.add(".asc");
+        TEXT_EXTENSIONS.add(".gpg");
+    }
+
+    /**
+     * Check if a file is likely a text file based on extension
+     */
+    private boolean isTextFile(String filename) {
+        if (filename == null || filename.isEmpty()) {
+            return false;
+        }
+
+        // Check exact filename matches (e.g., "Makefile", "Dockerfile")
+        if (TEXT_EXTENSIONS.contains(filename)) {
+            return true;
+        }
+
+        // Check extension
+        int lastDot = filename.lastIndexOf('.');
+        if (lastDot > 0 && lastDot < filename.length() - 1) {
+            String ext = filename.substring(lastDot);
+            return TEXT_EXTENSIONS.contains(ext);
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if data appears to be text content by inspecting bytes.
+     * Returns true if data doesn't contain binary markers.
+     */
+    private boolean looksLikeText(byte[] data) {
+        if (data == null || data.length == 0) {
+            return true; // Empty is considered text
+        }
+
+        // Quick check: null bytes are a strong indicator of binary
+        for (byte b : data) {
+            if (b == 0) {
+                return false;
+            }
+        }
+
+        // For small files, check all bytes; for larger files, sample first 8KB
+        int sampleSize = data.length;
+        if (sampleSize > 8192) {
+            sampleSize = 8192;
+        }
+
+        // Count non-printable characters (excluding common whitespace)
+        // Printable: 9-13 (tab, newline, etc), 32-126 (ASCII printable), 128+ (UTF-8)
+        int nonPrintable = 0;
+        for (int i = 0; i < sampleSize; i++) {
+            byte b = data[i];
+            // Allow: tab (9), newline (10), vertical tab (11), form feed (12), carriage return (13)
+            // Allow: space (32) to ~ (126)
+            // Allow: bytes >= 128 (UTF-8 continuation/leading bytes) - represented as negative in signed byte
+            boolean isPrintable = (b >= 9 && b <= 13) || (b >= 32 && b <= 126) || (b < 0);
+            if (!isPrintable) {
+                nonPrintable++;
+            }
+        }
+
+        // If more than 5% non-printable, likely binary
+        int threshold = sampleSize / 20;
+        return nonPrintable <= threshold;
     }
 }

@@ -3,6 +3,24 @@ gomobile:
 	gomobile bind -target=ios -o txqr.framework github.com/divan/txqr/mobile
 
 # ============================================================================
+# CLI Docker build
+# ============================================================================
+
+# Build arguments for CLI (defaults: darwin/arm64 for Apple Silicon)
+CLI_GOOS ?= darwin
+CLI_GOARCH ?= arm64
+
+# Build CLI binary
+cli:
+	docker build \
+		--build-arg GOOS=$(CLI_GOOS) \
+		--build-arg GOARCH=$(CLI_GOARCH) \
+		-f Dockerfile \
+		-t txqr-cli .
+	docker run --rm -v "$(PWD):/output" txqr-cli sh -c "cp /txqr /output/"
+	@echo "CLI built: ./txqr ($(CLI_GOOS)/$(CLI_GOARCH))"
+
+# ============================================================================
 # Android Docker builds
 # ============================================================================
 
@@ -40,4 +58,4 @@ release:
 		--notes "## txqr $(VERSION)\n\n### 📱 Android APK\n- Install on Android device (enable Unknown sources)\n\n### Features\n- QR code animation scanning\n- Large file transfer (Fountain codes)\n\n### Usage\n\`\`\`bash\n# Generate QR code\ntxqr write myfile.txt\n\n# Terminal mode\ntxqr write --terminal myfile.txt\n\n# Scan QR codes\ntxqr read\n\`\`\`" \
 		./txqr.apk
 
-.PHONY: gomobile aar apk android clean-android release
+.PHONY: gomobile cli aar apk android clean-android release

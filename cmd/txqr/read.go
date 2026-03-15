@@ -141,18 +141,14 @@ func handleQRFrame(data string) wsResponse {
 			return wsResponse{Type: "error", Error: fmt.Sprintf("base64 decode: %v", err)}
 		}
 
-		// Parse "<filename>\n<base64_data>"
+		// Parse "<filename>\n<compressed_data>" (single base64 encoding - simplified)
 		payload := string(raw)
 		newlineIdx := strings.Index(payload, "\n")
 		if newlineIdx == -1 {
 			return wsResponse{Type: "error", Error: "invalid payload format"}
 		}
 		decodedName = payload[:newlineIdx]
-		b64Data := payload[newlineIdx+1:]
-		compressed, err := base64.StdEncoding.DecodeString(b64Data)
-		if err != nil {
-			return wsResponse{Type: "error", Error: fmt.Sprintf("base64 data decode: %v", err)}
-		}
+		compressed := []byte(payload[newlineIdx+1:]) // Direct compressed bytes (no inner base64)
 
 		// Decompress flate data
 		r := flate.NewReader(bytes.NewReader(compressed))
@@ -165,7 +161,8 @@ func handleQRFrame(data string) wsResponse {
 		log.Printf("[INFO] Decoding completed! File: %s, Size: %d bytes", decodedName, len(decoded))
 
 		resp := wsResponse{Type: "completed", Total: len(decoded), Filename: decodedName}
-		if isTextFile(decodedName) {
+		// Check both extension and content to determine if it's text
+		if isTextFile(decodedName) || looksLikeText(decoded) {
 			resp.IsText = true
 			resp.Content = string(decoded)
 		}
@@ -228,33 +225,83 @@ var textExtensions = map[string]bool{
 	".css":        true,
 	".js":         true,
 	".ts":         true,
+	".jsx":        true,
+	".tsx":        true,
 	".go":         true,
 	".py":         true,
 	".rs":         true,
 	".c":          true,
 	".cpp":        true,
+	".cc":         true,
+	".cxx":        true,
 	".h":          true,
+	".hpp":        true,
 	".java":       true,
+	".kt":         true,
+	".kts":        true,
+	".swift":      true,
 	".sh":         true,
 	".bash":       true,
 	".zsh":        true,
+	".fish":       true,
+	".ps1":        true,
 	".yaml":       true,
 	".yml":        true,
 	".toml":       true,
 	".ini":        true,
 	".cfg":        true,
 	".conf":       true,
+	".config":     true,
 	".log":        true,
 	".csv":        true,
 	".tsv":        true,
 	".sql":        true,
 	".graphql":    true,
 	".graphqls":   true,
+	".gql":        true,
 	".proto":      true,
 	".Makefile":   true,
 	".Dockerfile": true,
+	".dockerignore": true,
 	".gitignore":  true,
 	".gitattributes": true,
+	".gitmodules": true,
+	".editorconfig": true,
+	".env":        true,
+	".env.local":  true,
+	".rfc":        true,
+	".rst":        true,
+	".tex":        true,
+	".lua":        true,
+	".rb":         true,
+	".php":        true,
+	".scala":      true,
+	".sc":         true,
+	".clj":        true,
+	".cljs":       true,
+	".edn":        true,
+	".vim":        true,
+	".nix":        true,
+	".pl":         true,
+	".pm":         true,
+	".r":          true,
+	".R":          true,
+	".m":          true,
+	".mm":         true,
+	".dart":       true,
+	".groovy":     true,
+	".gradle":     true,
+	".props":      true,
+	".properties": true,
+	".bat":        true,
+	".cmd":        true,
+	".powershell": true,
+	".pem":        true,
+	".crt":        true,
+	".key":        true,
+	".pub":        true,
+	".asc":        true,
+	".gpg":        true,
 }
 
 // isTextFile checks if a file is likely a text file based on extension
@@ -271,8 +318,49 @@ func isTextFile(filename string) bool {
 		}
 	}
 
-	// No extension or unknown extension - treat as binary
+	// No extension or unknown extension - will check content
 	return false
+}
+
+// looksLikeText checks if data appears to be text content by inspecting bytes
+// Returns true if data doesn't contain binary markers (null bytes, high ratio of non-printable)
+func looksLikeText(data []byte) bool {
+	if len(data) == 0 {
+		return true // Empty is considered text
+	}
+
+	// Quick check: null bytes are a strong indicator of binary
+	if bytes.Contains(data, []byte{0}) {
+		return false
+	}
+
+	// For small files, do a more thorough check
+	sampleSize := len(data)
+	if sampleSize > 8192 {
+		sampleSize = 8192 // Check first 8KB
+	}
+
+	// Count non-printable characters (excluding common whitespace)
+	// Printable: 9-13 (tab, newline, etc), 32-126 (ASCII printable), 128+ (UTF-8)
+	nonPrintable := 0
+	for i := 0; i < sampleSize; i++ {
+		b := data[i]
+		// Allow: tab (9), newline (10), vertical tab (11), form feed (12), carriage return (13)
+		// Allow: space (32) to ~ (126)
+		// Allow: bytes >= 128 (UTF-8 continuation/leading bytes)
+		if b != 9 && b != 10 && b != 11 && b != 12 && b != 13 &&
+			(b < 32 || b > 126) && b < 128 {
+			nonPrintable++
+		}
+	}
+
+	// If more than 5% non-printable (in the restricted range), likely binary
+	threshold := sampleSize / 20
+	if nonPrintable > threshold {
+		return false
+	}
+
+	return true
 }
 
 const indexHTML = `<!DOCTYPE html>
@@ -286,14 +374,18 @@ const indexHTML = `<!DOCTYPE html>
   body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     background: #0f172a; color: #e2e8f0;
-    display: flex; flex-direction: column; align-items: center;
     min-height: 100vh; padding: 20px;
   }
-  h1 { font-size: 1.5rem; margin-bottom: 16px; color: #38bdf8; }
+  h1 { font-size: 1.5rem; margin-bottom: 16px; color: #38bdf8; text-align: center; }
+  .mainRow {
+    display: flex; gap: 16px; align-items: flex-start;
+    max-width: 900px; margin: 0 auto;
+  }
   #videoContainer {
-    position: relative; width: 100%; max-width: 480px;
+    flex: 0 0 400px;
+    position: relative;
     border-radius: 12px; overflow: hidden;
-    border: 2px solid #334155; margin-bottom: 16px;
+    border: 2px solid #334155;
   }
   video { width: 100%; display: block; }
   canvas { display: none; }
@@ -301,42 +393,46 @@ const indexHTML = `<!DOCTYPE html>
     position: absolute; top: 0; left: 0; width: 100%; height: 100%;
     pointer-events: none;
   }
-  #status {
-    background: #1e293b; border-radius: 8px; padding: 16px;
-    width: 100%; max-width: 480px; margin-bottom: 16px;
-    text-align: center;
+  .rightPanel {
+    flex: 1;
+    display: flex; flex-direction: column; gap: 12px;
   }
-  #statusText { font-size: 0.95rem; color: #94a3b8; margin-bottom: 8px; }
+  #status {
+    background: #1e293b; border-radius: 8px; padding: 12px;
+  }
+  #statusText { font-size: 0.9rem; color: #94a3b8; margin-bottom: 8px; }
   #progressBar {
-    width: 100%; height: 8px; background: #334155;
-    border-radius: 4px; overflow: hidden;
+    width: 100%; height: 6px; background: #334155;
+    border-radius: 3px; overflow: hidden;
   }
   #progressFill {
     height: 100%; width: 0%; background: #38bdf8;
     transition: width 0.3s ease;
   }
   #stats {
-    font-size: 0.8rem; color: #64748b; margin-top: 8px;
+    font-size: 0.75rem; color: #64748b; margin-top: 6px;
+  }
+  #frameCount { color: #38bdf8; font-weight: bold; }
+  .buttons {
+    display: flex; gap: 8px; flex-wrap: wrap;
   }
   .btn {
-    display: none; padding: 12px 32px; border: none; border-radius: 8px;
-    font-size: 1rem; font-weight: 600; cursor: pointer;
+    padding: 10px 20px; border: none; border-radius: 6px;
+    font-size: 0.9rem; font-weight: 600; cursor: pointer;
     transition: background 0.2s;
   }
   #downloadBtn { background: #22c55e; color: #fff; }
   #downloadBtn:hover { background: #16a34a; }
-  #resetBtn {
-    display: none; background: #475569; color: #e2e8f0;
-    margin-left: 8px;
-  }
+  #resetBtn { background: #475569; color: #e2e8f0; }
   #resetBtn:hover { background: #64748b; }
-  .buttons { margin-top: 12px; }
-  #frameCount { color: #38bdf8; font-weight: bold; }
+  #previewBtn { background: #3b82f6; color: #fff; }
+  #previewBtn:hover { background: #2563eb; }
+  #copyBtn { background: #8b5cf6; color: #fff; }
+  #copyBtn:hover { background: #7c3aed; }
   #textContent {
     display: none;
-    width: 100%; max-width: 600px;
     background: #1e293b; border-radius: 8px; padding: 16px;
-    margin-top: 16px;
+    max-width: 900px; margin: 16px auto 0;
   }
   #textContent pre {
     margin: 0; white-space: pre-wrap; word-break: break-all;
@@ -356,26 +452,31 @@ const indexHTML = `<!DOCTYPE html>
 </head>
 <body>
 <h1>txqr reader</h1>
-<div id="videoContainer">
-  <video id="video" autoplay playsinline></video>
-  <canvas id="overlay"></canvas>
-</div>
-<canvas id="canvas"></canvas>
-<div id="status">
-  <div id="statusText">Initializing camera...</div>
-  <div id="progressBar"><div id="progressFill"></div></div>
-  <div id="stats">Frames decoded: <span id="frameCount">0</span></div>
+<div class="mainRow">
+  <div id="videoContainer">
+    <video id="video" autoplay playsinline></video>
+    <canvas id="overlay"></canvas>
+  </div>
+  <canvas id="canvas"></canvas>
+  <div class="rightPanel">
+    <div id="status">
+      <div id="statusText">Initializing camera...</div>
+      <div id="progressBar"><div id="progressFill"></div></div>
+      <div id="stats">Frames: <span id="frameCount">0</span></div>
+    </div>
+    <div class="buttons">
+      <button class="btn" id="downloadBtn">Download</button>
+      <button class="btn" id="resetBtn">Reset</button>
+      <button class="btn" id="previewBtn">Preview</button>
+      <button class="btn" id="copyBtn">Copy</button>
+    </div>
+  </div>
 </div>
 <div id="textContent">
   <div id="textContentHeader">
     <span id="textContentTitle"></span>
-    <button class="btn" id="copyBtn" style="display: inline-block; padding: 6px 16px; font-size: 0.85rem; background: #3b82f6;">Copy</button>
   </div>
   <pre id="textContentBody"></pre>
-</div>
-<div class="buttons">
-  <button class="btn" id="downloadBtn">Download File</button>
-  <button class="btn" id="resetBtn">Reset</button>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
@@ -391,10 +492,11 @@ const indexHTML = `<!DOCTYPE html>
   const frameCount = document.getElementById('frameCount');
   const downloadBtn = document.getElementById('downloadBtn');
   const resetBtn = document.getElementById('resetBtn');
+  const previewBtn = document.getElementById('previewBtn');
+  const copyBtn = document.getElementById('copyBtn');
   const textContent = document.getElementById('textContent');
   const textContentTitle = document.getElementById('textContentTitle');
   const textContentBody = document.getElementById('textContentBody');
-  const copyBtn = document.getElementById('copyBtn');
 
   let ws;
   let frames = 0;
@@ -402,6 +504,8 @@ const indexHTML = `<!DOCTYPE html>
   let scanning = false;
   let lastSent = '';
   let totalSize = 0;
+  let decodedContent = null;
+  let decodedFilename = '';
 
   function connectWS() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -430,7 +534,7 @@ const indexHTML = `<!DOCTYPE html>
         frameCount.textContent = frames;
         if (resp.total > 0) {
           totalSize = resp.total;
-          statusText.textContent = 'Scanning... Total data: ' + totalSize + ' bytes';
+          statusText.textContent = 'Scanning... Total: ' + totalSize + ' bytes';
         }
         break;
       case 'completed':
@@ -438,36 +542,38 @@ const indexHTML = `<!DOCTYPE html>
         scanning = false;
         totalSize = resp.total;
         progressFill.style.width = '100%';
-        const filename = resp.filename || 'output.bin';
-        statusText.textContent = 'Decoding complete! File: ' + filename + ' (' + totalSize + ' bytes)';
+        decodedFilename = resp.filename || 'output.bin';
+        statusText.textContent = 'Complete! ' + decodedFilename + ' (' + totalSize + ' bytes)';
 
         if (resp.isText && resp.content !== undefined) {
-          textContentTitle.textContent = filename;
-          textContentBody.textContent = resp.content;
-          textContent.style.display = 'block';
-          copyBtn.style.display = 'inline-block';
-          downloadBtn.style.display = 'none';
-        } else {
-          textContent.style.display = 'none';
-          copyBtn.style.display = 'none';
+          decodedContent = resp.content;
           downloadBtn.style.display = 'inline-block';
+          previewBtn.style.display = 'inline-block';
+          copyBtn.style.display = 'inline-block';
+        } else {
+          decodedContent = null;
+          downloadBtn.style.display = 'inline-block';
+          previewBtn.style.display = 'none';
+          copyBtn.style.display = 'none';
         }
         resetBtn.style.display = 'inline-block';
         break;
       case 'error':
-        // non-fatal, keep scanning
         break;
       case 'reset':
         frames = 0;
         frameCount.textContent = '0';
         completed = false;
         totalSize = 0;
+        decodedContent = null;
+        decodedFilename = '';
         progressFill.style.width = '0%';
         statusText.textContent = 'Reset. Point camera at animated QR code.';
         downloadBtn.style.display = 'none';
         resetBtn.style.display = 'none';
-        textContent.style.display = 'none';
+        previewBtn.style.display = 'none';
         copyBtn.style.display = 'none';
+        textContent.style.display = 'none';
         lastSent = '';
         startScanning();
         break;
@@ -484,17 +590,28 @@ const indexHTML = `<!DOCTYPE html>
     }
   });
 
+  previewBtn.addEventListener('click', () => {
+    if (decodedContent !== null) {
+      textContentTitle.textContent = decodedFilename;
+      textContentBody.textContent = decodedContent;
+      textContent.style.display = 'block';
+    }
+  });
+
   copyBtn.addEventListener('click', async () => {
+    if (decodedContent === null) return;
     try {
-      await navigator.clipboard.writeText(textContentBody.textContent);
+      await navigator.clipboard.writeText(decodedContent);
+      const origText = copyBtn.textContent;
       copyBtn.textContent = 'Copied!';
       setTimeout(() => {
-        copyBtn.textContent = 'Copy';
+        copyBtn.textContent = origText;
       }, 2000);
     } catch (err) {
+      const origText = copyBtn.textContent;
       copyBtn.textContent = 'Failed';
       setTimeout(() => {
-        copyBtn.textContent = 'Copy';
+        copyBtn.textContent = origText;
       }, 2000);
     }
   });
@@ -533,7 +650,6 @@ const indexHTML = `<!DOCTYPE html>
 
       overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
       if (code) {
-        // draw bounding box
         overlayCtx.strokeStyle = '#38bdf8';
         overlayCtx.lineWidth = 3;
         overlayCtx.beginPath();
@@ -544,7 +660,6 @@ const indexHTML = `<!DOCTYPE html>
         overlayCtx.closePath();
         overlayCtx.stroke();
 
-        // avoid sending duplicate consecutive frames
         if (code.data !== lastSent && ws && ws.readyState === WebSocket.OPEN) {
           lastSent = code.data;
           ws.send(JSON.stringify({type: 'qr', data: code.data}));

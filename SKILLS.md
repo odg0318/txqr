@@ -12,7 +12,15 @@ The txqr project uses multiple build systems:
 
 ## Make Targets
 
-### Desktop Builds
+### CLI Builds (Docker-based)
+
+```bash
+make cli                                      # Build CLI (darwin/arm64 default)
+make cli CLI_GOOS=darwin CLI_GOARCH=amd64    # Build for Intel Mac
+make cli CLI_GOOS=linux CLI_GOARCH=amd64     # Build for Linux
+```
+
+### iOS Builds
 
 ```bash
 make gomobile    # Build iOS framework via gomobile
@@ -101,6 +109,40 @@ docker build --platform=linux/amd64 \
 ```bash
 docker run --rm -v "$(PWD):/output" txqr-apk \
   sh -c "cp /output/txqr.apk /output/"
+```
+
+### Dockerfile (CLI Builds)
+
+The project also has a separate Dockerfile for cross-platform CLI builds:
+
+```dockerfile
+FROM golang:1.25-alpine
+
+# Build arguments for target platform (defaults: darwin/arm64)
+ARG GOOS=darwin
+ARG GOARCH=arm64
+
+RUN apk -U add git ca-certificates
+
+WORKDIR /src
+COPY . .
+
+RUN go mod tidy && \
+    go mod verify && \
+    CGO_ENABLED=0 GOOS=${GOOS} GOARCH=${GOARCH} go build -o /txqr ./cmd/txqr
+```
+
+**Usage:**
+```bash
+# Build for Apple Silicon (default)
+docker build -f Dockerfile -t txqr-cli .
+
+# Build for specific platform
+docker build \
+  --build-arg GOOS=linux \
+  --build-arg GOARCH=amd64 \
+  -f Dockerfile \
+  -t txqr-cli .
 ```
 
 ### Docker Build Examples
@@ -289,8 +331,28 @@ The Android app (`com.github.divan.txqr`) provides:
 4. **Relay Mode**: Re-transmit scanned QR codes to another device
    - Stores raw QR chunks during scanning
    - Generates QR codes on-demand using ZXing
-   - Frame-by-frame animation at 5 FPS
+   - Frame-by-frame animation at 20 FPS (50ms delay)
    - No re-encoding needed - true fountain code relay
+5. **Write Mode**: Create animated QR from text input
+   - Text input via multi-line EditText
+   - Modal popup for QR display
+   - GENERATE/CLEAR buttons
+6. **Tab UI**: Toggle between Read/Write modes
+   - Read mode: Camera scanning + relay
+   - Write mode: Text input + QR generation
+
+### Data Encoding (Current)
+
+**Simplified single base64 encoding:**
+```
+Original Data → Flate compress (BEST_COMPRESSION) →
+Add filename → Base64 encode → Fountain codes → QR chunks
+```
+
+**Cross-platform compatibility:**
+- Raw deflate format (no zlib header)
+- ISO-8859-1 character encoding for byte preservation
+- Single base64 encoding (reduced from double)
 
 ### Build Output
 
@@ -348,7 +410,15 @@ The Android app (`com.github.divan.txqr`) provides:
 
 ## Quick Reference
 
-### Build CLI (Desktop)
+### Build CLI (Docker - Recommended)
+
+```bash
+make cli                    # Build for darwin/arm64 (Apple Silicon)
+make cli CLI_GOOS=darwin CLI_GOARCH=amd64    # Intel Mac
+make cli CLI_GOOS=linux CLI_GOARCH=amd64     # Linux AMD64
+```
+
+### Build CLI (Local - Quick Testing)
 
 ```bash
 go build -o txqr ./cmd/txqr
@@ -432,3 +502,26 @@ This is useful for:
 - Extending range of QR transmission
 - Relay through multiple devices
 - Overcoming line-of-sight limitations
+
+## Recent Changes (2024-03)
+
+### Encoding Simplification
+- **Single base64 encoding** (was double) - ~33% size reduction
+- **Raw deflate format** - Go `flate.NewWriter`, Android `Deflater(level, true)`
+- **BEST_COMPRESSION** - Level 9 for consistency
+- **ISO-8859-1** - 1:1 byte mapping for Go/Java compatibility
+
+### CLI Docker Build System
+- **Dockerfile** - Multi-platform CLI builds with ARG support
+- **Makefile** - `make cli` target with platform variables
+- Defaults to darwin/arm64, supports GOOS/GOARCH overrides
+
+### Web UI Redesign
+- **Horizontal layout**: Scanner (left) + Button panel (right)
+- **4 buttons**: Download (green), Reset (gray), Preview (blue), Copy (purple)
+- **Preview on demand**: Click to show text content below
+
+### Android UTF-8 Support
+- **Fixed `looksLikeText()`** - Now properly detects UTF-8 text
+- **Bug fix**: Changed condition from `b < 32 && b < 0` to proper logic
+- **Result**: Korean, Chinese, Japanese text now shows Preview button
