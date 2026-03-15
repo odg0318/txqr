@@ -248,3 +248,292 @@ txqr version
 - **Animation loops** infinitely in terminal mode (Ctrl+C to exit)
 - **GIF mode** requires explicit `-o` flag or `--gif` flag
 - **Version info** injected via ldflags in CI/CD builds
+
+## Feature 1: Android Animated QR Relay
+
+### Overview
+Android app can scan animated QR codes and re-transmit them as animated QR codes, acting as a QR repeater/relay. This extends the range of QR transmission through multiple devices.
+
+**User Flow:**
+1. MacBook1 generates animated QR → Android app scans it
+2. Android app generates animated QR from scanned chunks
+3. MacBook2 scans relayed QR → receives original data
+
+### Technical Implementation
+
+#### True Relay Approach
+Instead of decoding and re-encoding, the app:
+1. **Stores raw QR chunks** during scanning (`scannedChunks` ArrayList)
+2. **Regenerates QR images** from stored chunks using ZXing
+3. **Pre-generates all bitmaps** at scan completion for smooth animation
+4. **Displays animated QR** using frame-by-frame bitmap switching
+
+This is more efficient because:
+- No redundant fountain code encoding
+- Preserves original encoding parameters
+- Faster processing (no decode→re-encode cycle)
+
+#### Key Components
+
+**MainActivity.java** - Main activity with relay functionality
+
+| Component | Purpose |
+|-----------|---------|
+| `scannedChunks: ArrayList<String>` | Stores raw QR chunk strings during scan |
+| `qrBitmaps: ArrayList<Bitmap>` | Pre-generated QR bitmaps for smooth animation |
+| `previewMode: int` | Toggle state: 0=Preview(text), 1=Relay, 2=Hide |
+| `QR_SIZE = 750` | QR code size (2.5x larger for better recognition) |
+| `FRAME_DELAY_MS = 50` | Animation delay (20 FPS) |
+
+**UI Components:**
+- `DecoratedBarcodeView` - Camera QR scanner
+- `qrDisplayView` (ImageView) - Displays animated QR in relay mode
+- `textScrollView` - Scrollable text view for decoded content
+- `previewButton` (Button) - Single toggle: Preview → Relay → Hide → Preview
+- `downloadButton`, `resetButton`, `copyButton` - File operations
+
+#### Relay Mode Behavior
+
+**Toggle States:**
+1. **Preview (mode 0)**: Shows decoded text content
+2. **Relay (mode 1)**: Shows animated QR for re-transmission
+3. **Hide (mode 2)**: Hides both text and QR
+
+**Animation:**
+- Uses pre-generated bitmaps for smooth playback
+- Handler + Runnable pattern for frame scheduling
+- Loops infinitely until user toggles away or resets
+
+#### Background Processing
+
+**QR Bitmap Generation:**
+```java
+private void generateQRBitmapsInBackground() {
+    new Thread(() -> {
+        generateQRBitmaps();  // Runs in background
+        relayHandler.post(() -> {
+            statusText.setText("Complete! " + decodedFilename);
+        });
+    }).start();
+}
+```
+
+Prevents UI hang during QR generation by running on background thread.
+
+#### Dependencies
+
+**Android (build.gradle):**
+```gradle
+implementation 'androidx.appcompat:appcompat:1.6.1'
+implementation 'com.google.zxing:core:3.5.1'
+implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
+implementation 'com.github.bumptech.glide:glide:4.16.0'
+implementation(name: 'txqr', ext: 'aar')  // gomobile binding
+```
+
+**Mobile (gomobile bindings):**
+- `mobile/decode.go` - Decoder with progress tracking
+- `mobile/encode.go` - Encoder bindings (prepared for Feature 2)
+
+#### Build Process
+
+**AAR Build (gomobile binding):**
+```bash
+docker build --platform=linux/amd64 \
+  -f Dockerfile.android \
+  --target aar-builder \
+  -t txqr-aar .
+```
+
+**APK Build:**
+```bash
+docker build --platform=linux/amd64 \
+  -f Dockerfile.android \
+  --target apk-builder \
+  -t txqr-apk .
+```
+
+**Installation:**
+```bash
+adb uninstall com.github.divan.txqr 2>/dev/null; adb install txqr.apk
+```
+
+#### Known Issues & Solutions
+
+**Issue 1:** Text shows before Preview button is clicked
+- **Solution:** Set `textScrollView.setVisibility(View.GONE)` initially
+
+**Issue 2:** UI hang during QR bitmap generation
+- **Solution:** Run bitmap generation in background thread
+
+**Issue 3:** QR animation too slow
+- **Solution:** Pre-generate all bitmaps at scan completion
+
+### File Structure
+
+```
+android/app/src/main/java/com/github/divan/txqr/
+└── MainActivity.java          # Main activity with relay functionality
+
+mobile/
+├── decode.go                  # gomobile decoder bindings
+└── encode.go                  # gomobile encoder bindings (Feature 2 prep)
+```
+
+### Testing
+
+**Test Relay Flow:**
+1. Generate QR on macOS: `txqr write -o test.gif file.txt`
+2. Scan on Android app
+3. Wait for decoding completion
+4. Click "Preview" → verify text content
+5. Click "Relay" → verify QR animation
+6. Scan relayed QR on another device
+7. Verify file contents match original
+
+## Feature 2: Android Write Mode (Text → Animated QR)
+
+### Overview
+안드로이드 앱에 텍스트를 입력하여 animated QR을 생성하는 기능입니다. 사용자가 직접 텍스트를 입력하고 QR 코드를 생성하여 다른 기기로 전송할 수 있습니다.
+
+**사용 흐름:**
+1. 앱 실행 → "Write" 탭 선택
+2. Textarea에 텍스트 입력
+3. "Generate QR" 버튼 클릭
+4. Animated QR 표시
+5. 다른 기기에서 스캔
+
+### Technical Implementation
+
+#### Tab UI Architecture
+- **Read Mode**: 기존 QR 스캔 기능 (barcodeView, decoder, 등)
+- **Write Mode**: 텍스트 입력 + QR 생성 기능
+- **Toggle**: Footer에 Read/Write 탭으로 전환
+
+#### Data Encoding Flow (Write Mode)
+```
+Input Text
+    ↓ (flate compress)
+Compressed Data
+    ↓ (base64 encode)
+<filename>\n<base64_compressed_data>
+    ↓ (base64 encode again)
+Double-encoded payload
+    ↓ (gomobile: encoder.encode())
+StringList (wrapper for []string)
+    ↓ (ZXing: QRCodeWriter.encode)
+QR bitmaps (ArrayList<Bitmap>)
+    ↓ (animation)
+Animated QR display
+```
+
+#### Key Components
+
+**MainActivity.java** - Write mode additions
+
+| Component | Purpose |
+|-----------|---------|
+| `readContainer` (LinearLayout) | Read mode UI (camera, scan) |
+| `writeContainer` (LinearLayout) | Write mode UI (textarea, generate) |
+| `readTabButton` (Button) | Switch to read mode |
+| `writeTabButton` (Button) | Switch to write mode |
+| `textInput` (EditText) | Multi-line text input |
+| `generateButton` (Button) | Generate QR from text |
+
+**Encoding Methods:**
+- `encodePayload(text)` - Compress + double base64 encoding
+- `compressFlate(data)` - Flate compression using Deflater
+- `generateQRFromText()` - Orchestrates encoding + QR generation
+
+#### gomobile Encoder Bindings
+
+**File:** [mobile/encode.go](mobile/encode.go)
+
+**StringList Wrapper Pattern:**
+gomobile doesn't support `[]string` return type directly. Solution: wrapper struct.
+
+```go
+type StringList struct {
+    items []string
+}
+
+func (s *StringList) Get(i int) string { return s.items[i] }
+func (s *StringList) Size() int        { return len(s.items) }
+
+func (e *Encoder) Encode(data string) *StringList {
+    chunks, _ := e.e.Encode(data)
+    return &StringList{items: chunks}
+}
+```
+
+**Java Usage:**
+```java
+Encoder encoder = Txqr.newEncoder(100);
+StringList chunks = encoder.encode(payload);
+
+for (int i = 0; i < (int)chunks.size(); i++) {
+    String chunk = chunks.get((long)i);
+    // Generate QR from chunk
+}
+```
+
+#### Write Mode Behavior
+
+**User Flow:**
+1. User clicks "Write" tab
+2. Camera pauses, scan stops
+3. Textarea appears for input
+4. User enters text and clicks "Generate QR"
+5. Background process:
+   - Encodes payload (compress + base64)
+   - Calls gomobile encoder for fountain codes
+   - Generates QR bitmaps using ZXing
+   - Displays animated QR
+
+**Animation:**
+- Reuses `startQRAnimation()` from relay mode
+- Same frame-by-frame bitmap switching
+- 20 FPS (50ms delay)
+
+#### Dependencies
+
+**Mobile (gomobile bindings):**
+- `mobile/decode.go` - Decoder with progress tracking
+- `mobile/encode.go` - Encoder with StringList wrapper
+
+### Known Issues & Solutions
+
+**Issue:** gomobile doesn't support `[]string` return type
+- **Solution:** StringList wrapper struct with `Get(i)` and `Size()` methods
+
+**Issue:** UI hang during QR bitmap generation
+- **Solution:** Run encoding + QR generation in background thread
+
+**Issue:** gomobile method naming convention
+- **Solution:** Go exported methods (uppercase) → Java lowercase (`Encode()` → `encode()`)
+
+### File Structure
+
+```
+android/app/src/main/java/com/github/divan/txqr/
+└── MainActivity.java          # Main activity with read/write modes
+
+mobile/
+├── decode.go                  # gomobile decoder bindings
+└── encode.go                  # gomobile encoder bindings with StringList wrapper
+```
+
+### Testing
+
+**Test Write Mode Flow:**
+1. Open app → Click "Write" tab
+2. Enter text: "Hello from Android!"
+3. Click "Generate QR"
+4. Verify animated QR appears
+5. Scan with another device
+6. Verify received text matches original
+
+**Test Tab Switching:**
+1. Read → Write → Read → Verify camera resumes
+2. Generate QR → Switch to Read → Verify QR stops
+3. Switch during relay → Verify relay stops

@@ -2,6 +2,7 @@ package com.github.divan.txqr;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.Dialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -13,6 +14,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
 import android.view.View;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -37,6 +39,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.zip.Deflater;
 import java.util.zip.Inflater;
 
 public class MainActivity extends Activity {
@@ -60,6 +63,14 @@ public class MainActivity extends Activity {
     private ImageView qrDisplayView;
     private LinearLayout qrContainerLayout;
 
+    // Read/Write mode containers
+    private LinearLayout readContainer;
+    private LinearLayout writeContainer;
+    private Button readTabButton;
+    private Button writeTabButton;
+    private android.widget.EditText textInput;
+    private Button generateButton;
+
     private int frameCount = 0;
     private String decodedData = null;
     private String decodedFilename = null;
@@ -74,6 +85,15 @@ public class MainActivity extends Activity {
     private Runnable relayRunnable;
     private int currentRelayFrame = 0;
     private boolean isRelaying = false;
+
+    // Modal dialog for QR display
+    private Dialog qrDialog;
+    private ImageView qrDialogImageView;
+    private Handler qrDialogHandler = new Handler(Looper.getMainLooper());
+    private Runnable qrDialogRunnable;
+    private boolean isQrDialogAnimating = false;
+    private int currentQrDialogFrame = 0;
+    private ArrayList<Bitmap> qrDialogBitmaps = new ArrayList<>();
 
     // Preview mode: 0 = show text, 1 = relay, 2 = hide
     private int previewMode = 0;
@@ -106,24 +126,53 @@ public class MainActivity extends Activity {
         layout.setOrientation(android.widget.LinearLayout.VERTICAL);
         layout.setPadding(16, 16, 16, 16);
 
+        // ===== Tab Layout =====
+        android.widget.LinearLayout tabLayout = new android.widget.LinearLayout(this);
+        tabLayout.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        tabLayout.setPadding(0, 0, 0, 16);
+
+        readTabButton = new Button(this);
+        readTabButton.setText("Read");
+        readTabButton.setBackgroundColor(0xFF3B82F6); // Blue for active
+        readTabButton.setTextColor(0xFFFFFFFF);
+        readTabButton.setLayoutParams(new android.widget.LinearLayout.LayoutParams(
+                0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        readTabButton.setOnClickListener(v -> switchToReadMode());
+        tabLayout.addView(readTabButton);
+
+        writeTabButton = new Button(this);
+        writeTabButton.setText("Write");
+        writeTabButton.setBackgroundColor(0xFF1E293B); // Dark for inactive
+        writeTabButton.setTextColor(0xFF94A3B8);
+        writeTabButton.setLayoutParams(new android.widget.LinearLayout.LayoutParams(
+                0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        writeTabButton.setOnClickListener(v -> switchToWriteMode());
+        tabLayout.addView(writeTabButton);
+
+        layout.addView(tabLayout);
+
+        // ===== Read Mode Container =====
+        readContainer = new android.widget.LinearLayout(this);
+        readContainer.setOrientation(android.widget.LinearLayout.VERTICAL);
+
         // Status text
         statusText = new TextView(this);
         statusText.setText("Initializing camera...");
         statusText.setTextSize(14);
         statusText.setPadding(0, 0, 0, 16);
-        layout.addView(statusText);
+        readContainer.addView(statusText);
 
         // Progress bar
         progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progressBar.setPadding(0, 0, 0, 16);
-        layout.addView(progressBar);
+        readContainer.addView(progressBar);
 
         // Frame count
         frameCountText = new TextView(this);
         frameCountText.setText("Frames: 0");
         frameCountText.setTextSize(12);
         frameCountText.setPadding(0, 0, 0, 16);
-        layout.addView(frameCountText);
+        readContainer.addView(frameCountText);
 
         // Barcode view
         barcodeView = new DecoratedBarcodeView(this);
@@ -133,7 +182,7 @@ public class MainActivity extends Activity {
                         600
                 );
         barcodeView.setLayoutParams(params);
-        layout.addView(barcodeView);
+        readContainer.addView(barcodeView);
 
         // Buttons layout (horizontal scrollable)
         android.widget.HorizontalScrollView buttonScrollLayout = new android.widget.HorizontalScrollView(this);
@@ -168,18 +217,73 @@ public class MainActivity extends Activity {
         buttonLayout.addView(copyButton);
 
         buttonScrollLayout.addView(buttonLayout);
-        layout.addView(buttonScrollLayout);
+        readContainer.addView(buttonScrollLayout);
 
-        // Footer with build info
-        TextView footerText = new TextView(this);
-        footerText.setText("Build: " + getBuildInfo());
-        footerText.setTextSize(10);
-        footerText.setTextColor(0xFF888888);
-        footerText.setGravity(android.view.Gravity.CENTER);
-        footerText.setPadding(0, 8, 0, 0);
-        layout.addView(footerText);
+        layout.addView(readContainer);
 
-        // QR display container (for relay mode)
+        // ===== Write Mode Container =====
+        writeContainer = new android.widget.LinearLayout(this);
+        writeContainer.setOrientation(android.widget.LinearLayout.VERTICAL);
+        writeContainer.setVisibility(View.GONE);  // Initially hidden
+
+        // Write mode status
+        TextView writeStatusText = new TextView(this);
+        writeStatusText.setText("Enter text to encode as QR code");
+        writeStatusText.setTextSize(14);
+        writeStatusText.setPadding(0, 0, 0, 16);
+        writeContainer.addView(writeStatusText);
+
+        // Text input area
+        android.widget.ScrollView inputScrollView = new android.widget.ScrollView(this);
+        inputScrollView.setLayoutParams(new android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1.0f));  // Takes remaining space
+
+        textInput = new android.widget.EditText(this);
+        textInput.setHint("Enter text here...");
+        textInput.setTextSize(14);
+        textInput.setPadding(16, 16, 16, 16);
+        textInput.setBackgroundColor(0xFF1E293B);
+        textInput.setTextColor(0xFFE2E8F0);
+        textInput.setGravity(android.view.Gravity.TOP | android.view.Gravity.START);
+        textInput.setMinLines(10);
+        inputScrollView.addView(textInput);
+        writeContainer.addView(inputScrollView);
+
+        // Buttons layout (Generate + Clear)
+        android.widget.LinearLayout writeButtonsLayout = new android.widget.LinearLayout(this);
+        writeButtonsLayout.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        writeButtonsLayout.setLayoutParams(new android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        // Generate button
+        generateButton = new Button(this);
+        generateButton.setText("GENERATE");
+        generateButton.setLayoutParams(new android.widget.LinearLayout.LayoutParams(
+                0,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                1.0f));
+        generateButton.setOnClickListener(v -> generateQRFromText());
+        writeButtonsLayout.addView(generateButton);
+
+        // Clear button
+        Button clearButton = new Button(this);
+        clearButton.setText("CLEAR");
+        clearButton.setLayoutParams(new android.widget.LinearLayout.LayoutParams(
+                0,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                1.0f));
+        clearButton.setOnClickListener(v -> clearWriteInput());
+        writeButtonsLayout.addView(clearButton);
+
+        writeContainer.addView(writeButtonsLayout);
+
+        layout.addView(writeContainer);
+
+        // ===== Shared Components =====
+        // QR display container (for relay/write mode)
         qrContainerLayout = new LinearLayout(this);
         qrContainerLayout.setOrientation(android.widget.LinearLayout.VERTICAL);
         qrContainerLayout.setPadding(0, 16, 0, 0);
@@ -197,7 +301,7 @@ public class MainActivity extends Activity {
 
         layout.addView(qrContainerLayout);
 
-        // Text content view (scrollable)
+        // Text content view (scrollable) - for read mode
         textScrollView = new ScrollView(this);
         android.widget.LinearLayout.LayoutParams scrollParams =
                 new android.widget.LinearLayout.LayoutParams(
@@ -216,6 +320,16 @@ public class MainActivity extends Activity {
         textScrollView.addView(textContentView);
 
         layout.addView(textScrollView);
+
+        // Footer with build info
+        TextView footerText = new TextView(this);
+        footerText.setText("Build: " + getBuildInfo());
+        footerText.setTextSize(10);
+        footerText.setTextColor(0xFF888888);
+        footerText.setGravity(android.view.Gravity.CENTER);
+        footerText.setPadding(0, 8, 0, 0);
+        layout.addView(footerText);
+
         setContentView(layout);
     }
 
@@ -429,7 +543,7 @@ public class MainActivity extends Activity {
                 qrContainerLayout.setVisibility(View.VISIBLE);
                 previewButton.setText("Hide");
                 statusText.setText("Relaying... Point another camera here");
-                startRelay();
+                startQRAnimation();
                 break;
 
             case 2: // Hide all
@@ -481,10 +595,14 @@ public class MainActivity extends Activity {
             barcodeView.pause();
         }
         stopRelay();
+        stopQRDialogAnimation();
+        if (qrDialog != null && qrDialog.isShowing()) {
+            qrDialog.dismiss();
+        }
     }
 
-    private void startRelay() {
-        if (scannedChunks.isEmpty() || qrBitmaps.isEmpty()) {
+    private void startQRAnimation() {
+        if (qrBitmaps.isEmpty()) {
             Toast.makeText(this, "No data to relay", Toast.LENGTH_SHORT).show();
             return;
         }
@@ -566,6 +684,265 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             android.util.Log.e("txqr", "Error generating QR: " + e.getMessage());
             return null;
+        }
+    }
+
+    // ===== Tab Switching =====
+
+    private void switchToReadMode() {
+        writeContainer.setVisibility(View.GONE);
+        readContainer.setVisibility(View.VISIBLE);
+
+        // Update tab button styles
+        readTabButton.setBackgroundColor(0xFF3B82F6); // Blue for active
+        readTabButton.setTextColor(0xFFFFFFFF);
+        writeTabButton.setBackgroundColor(0xFF1E293B); // Dark for inactive
+        writeTabButton.setTextColor(0xFF94A3B8);
+
+        // Stop QR dialog if running
+        stopQRDialogAnimation();
+        if (qrDialog != null && qrDialog.isShowing()) {
+            qrDialog.dismiss();
+        }
+
+        // Resume barcode scanner
+        barcodeView.resume();
+    }
+
+    private void switchToWriteMode() {
+        readContainer.setVisibility(View.GONE);
+        writeContainer.setVisibility(View.VISIBLE);
+
+        // Update tab button styles
+        writeTabButton.setBackgroundColor(0xFF3B82F6); // Blue for active
+        writeTabButton.setTextColor(0xFFFFFFFF);
+        readTabButton.setBackgroundColor(0xFF1E293B); // Dark for inactive
+        readTabButton.setTextColor(0xFF94A3B8);
+
+        // Pause barcode scanner and stop relay
+        barcodeView.pause();
+        stopRelay();
+
+        // Hide QR and text displays
+        qrContainerLayout.setVisibility(View.GONE);
+        textScrollView.setVisibility(View.GONE);
+    }
+
+    private void clearWriteInput() {
+        textInput.setText("");
+        Toast.makeText(this, "Cleared", Toast.LENGTH_SHORT).show();
+    }
+
+    // ===== Write Mode: Text Encoding =====
+
+    private String encodePayload(String text) throws IOException {
+        // 1. Flate compress
+        byte[] compressed = compressFlate(text.getBytes());
+
+        // 2. Base64 encode
+        String b64Data = Base64.encodeToString(compressed, Base64.NO_WRAP);
+
+        // 3. Add filename (default: "text.txt")
+        String payload = "text.txt\n" + b64Data;
+
+        // 4. Double base64 encode
+        return Base64.encodeToString(payload.getBytes(), Base64.NO_WRAP);
+    }
+
+    private byte[] compressFlate(byte[] data) throws IOException {
+        java.util.zip.Deflater deflater = new java.util.zip.Deflater(java.util.zip.Deflater.BEST_COMPRESSION);
+        deflater.setInput(data);
+        deflater.finish();
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        byte[] buffer = new byte[1024];
+
+        while (!deflater.finished()) {
+            int count = deflater.deflate(buffer);
+            baos.write(buffer, 0, count);
+        }
+
+        deflater.end();
+        return baos.toByteArray();
+    }
+
+    // ===== Write Mode: QR Generation =====
+
+    private void generateQRFromText() {
+        String text = textInput.getText().toString();
+        if (text.isEmpty()) {
+            Toast.makeText(this, "Please enter text", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        // Hide keyboard
+        InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        imm.hideSoftInputFromWindow(textInput.getWindowToken(), 0);
+
+        // Show loading status
+        Toast.makeText(this, "Generating QR codes...", Toast.LENGTH_SHORT).show();
+
+        new Thread(() -> {
+            try {
+                // Encode payload (compress + base64)
+                String payload = encodePayload(text);
+
+                // Encode with fountain codes (gomobile)
+                Encoder encoder = Txqr.newEncoder(100);  // chunk size
+                StringList chunks = encoder.encode(payload);
+
+                android.util.Log.d("txqr", "Generated " + chunks.size() + " chunks");
+
+                // Generate QR bitmaps for dialog
+                final ArrayList<Bitmap> writeQrBitmaps = new ArrayList<>();
+                for (int i = 0; i < chunks.size(); i++) {
+                    String chunk = chunks.get(i);
+                    Bitmap qrBitmap = generateQRCode(chunk);
+                    if (qrBitmap != null) {
+                        writeQrBitmaps.add(qrBitmap);
+                    }
+                }
+
+                android.util.Log.d("txqr", "Generated " + writeQrBitmaps.size() + " QR bitmaps");
+
+                // Show QR dialog on main thread
+                relayHandler.post(() -> {
+                    qrDialogBitmaps.clear();
+                    qrDialogBitmaps.addAll(writeQrBitmaps);
+                    showQRDialog();
+                    Toast.makeText(this, "QR codes generated!", Toast.LENGTH_SHORT).show();
+                });
+            } catch (Exception e) {
+                relayHandler.post(() -> {
+                    Toast.makeText(this, "Error: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                    android.util.Log.e("txqr", "Error generating QR", e);
+                });
+            }
+        }).start();
+    }
+
+    // ===== QR Modal Dialog =====
+
+    private void showQRDialog() {
+        // Stop any existing animation
+        stopQRDialogAnimation();
+
+        // Create dialog if not exists
+        if (qrDialog == null) {
+            createQRDialog();
+        }
+
+        // Reset animation state
+        currentQrDialogFrame = 0;
+        isQrDialogAnimating = true;
+
+        // Show dialog
+        qrDialog.show();
+
+        // Start animation
+        startQRDialogAnimation();
+    }
+
+    private void createQRDialog() {
+        qrDialog = new Dialog(this);
+
+        // Create layout programmatically
+        android.widget.LinearLayout dialogLayout = new android.widget.LinearLayout(this);
+        dialogLayout.setOrientation(android.widget.LinearLayout.VERTICAL);
+        dialogLayout.setPadding(24, 24, 24, 24);
+        dialogLayout.setBackgroundColor(0xFF000000);
+
+        // Title
+        TextView titleText = new TextView(this);
+        titleText.setText("Scan this QR code");
+        titleText.setTextSize(18);
+        titleText.setTextColor(0xFFFFFFFF);
+        titleText.setGravity(android.view.Gravity.CENTER);
+        titleText.setPadding(0, 0, 0, 16);
+        dialogLayout.addView(titleText);
+
+        // QR Image
+        qrDialogImageView = new ImageView(this);
+        qrDialogImageView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        android.widget.LinearLayout.LayoutParams imageParams =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                        800
+                );
+        qrDialogImageView.setLayoutParams(imageParams);
+        dialogLayout.addView(qrDialogImageView);
+
+        // Info text
+        TextView infoText = new TextView(this);
+        infoText.setText("QR frames: " + qrDialogBitmaps.size());
+        infoText.setTextSize(14);
+        infoText.setTextColor(0xFFCCCCCC);
+        infoText.setGravity(android.view.Gravity.CENTER);
+        infoText.setPadding(0, 16, 0, 16);
+        dialogLayout.addView(infoText);
+
+        // Close button
+        Button closeButton = new Button(this);
+        closeButton.setText("Close");
+        closeButton.setBackgroundColor(0xFF3B82F6);
+        closeButton.setTextColor(0xFFFFFFFF);
+        closeButton.setLayoutParams(new android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT));
+        closeButton.setOnClickListener(v -> {
+            stopQRDialogAnimation();
+            qrDialog.dismiss();
+        });
+        dialogLayout.addView(closeButton);
+
+        qrDialog.setContentView(dialogLayout);
+
+        // Cancel animation on dismiss
+        qrDialog.setOnDismissListener(dialog -> {
+            stopQRDialogAnimation();
+        });
+
+        // Set dialog size
+        android.view.Window window = qrDialog.getWindow();
+        if (window != null) {
+            window.setLayout(
+                    android.view.WindowManager.LayoutParams.MATCH_PARENT,
+                    android.view.WindowManager.LayoutParams.WRAP_CONTENT
+            );
+        }
+    }
+
+    private void startQRDialogAnimation() {
+        if (qrDialogBitmaps.isEmpty()) {
+            return;
+        }
+
+        isQrDialogAnimating = true;
+        currentQrDialogFrame = 0;
+
+        qrDialogRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (!isQrDialogAnimating) return;
+
+                Bitmap qrBitmap = qrDialogBitmaps.get(currentQrDialogFrame);
+                if (qrBitmap != null && qrDialogImageView != null) {
+                    qrDialogImageView.setImageBitmap(qrBitmap);
+                }
+
+                currentQrDialogFrame = (currentQrDialogFrame + 1) % qrDialogBitmaps.size();
+
+                qrDialogHandler.postDelayed(this, FRAME_DELAY_MS);
+            }
+        };
+
+        qrDialogHandler.post(qrDialogRunnable);
+    }
+
+    private void stopQRDialogAnimation() {
+        isQrDialogAnimating = false;
+        if (qrDialogHandler != null && qrDialogRunnable != null) {
+            qrDialogHandler.removeCallbacks(qrDialogRunnable);
         }
     }
 

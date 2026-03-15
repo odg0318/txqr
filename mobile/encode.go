@@ -4,6 +4,25 @@ import (
 	"github.com/divan/txqr"
 )
 
+// StringList wraps a string slice for gomobile binding.
+// gomobile doesn't support []string return type directly.
+type StringList struct {
+	items []string
+}
+
+// Get returns the item at index i.
+func (s *StringList) Get(i int) string {
+	if i < 0 || i >= len(s.items) {
+		return ""
+	}
+	return s.items[i]
+}
+
+// Size returns the number of items in the list.
+func (s *StringList) Size() int {
+	return len(s.items)
+}
+
 // Encoder wraps txqr.Encoder for gomobile binding.
 // This exposes encoder functionality to mobile platforms.
 type Encoder struct {
@@ -17,10 +36,10 @@ func NewEncoder(chunkSize int) *Encoder {
 }
 
 // Encode encodes the data string into fountain code chunks.
-// Returns a slice of chunk strings, each suitable for encoding as a QR code.
-func (e *Encoder) Encode(data string) []string {
+// Returns a StringList wrapper for gomobile compatibility.
+func (e *Encoder) Encode(data string) *StringList {
 	chunks, _ := e.e.Encode(data)
-	return chunks
+	return &StringList{items: chunks}
 }
 
 // SetRedundancyFactor sets the redundancy factor for encoding.
